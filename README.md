@@ -1,1 +1,1 @@
-# Azure-Automation-Authoring-Toolkit
+# Azure Automation Authoring Toolkit
