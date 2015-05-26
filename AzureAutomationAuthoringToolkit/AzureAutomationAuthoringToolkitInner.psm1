@@ -5,6 +5,8 @@
 $script:ConfigurationPath = "$PSScriptRoot\Config.json"
 $script:StaticAssetsPath = "$PSScriptRoot\StaticAssets.json"
 
+$global:AssetCache = @{}
+
 <#
     .SYNOPSIS
         Get a local certificate based on its thumbprint, as part of the Azure Automation Authoring Toolkit.
@@ -93,7 +95,7 @@ function Get-AzureAutomationAuthoringToolkitStaticAsset {
 function Get-AzureAutomationAuthoringToolkitConfiguration {       
     $ConfigurationError = "AzureAutomationAuthoringToolkit: AzureAutomationAuthoringToolkit configuration defined in 
     '$script:ConfigurationPath' is incorrect. Make sure the file exists, contains valid JSON, and contains 'AutomationAccountName,' 
-    'StaticAssetsPath,' and 'AllowGrabSecrets' fields."
+    'StaticAssetsPath,' 'SecretsCacheTimeInMinutes', and 'AllowGrabSecrets' fields."
 
     Write-Verbose "AzureAutomationAuthoringToolkit: Grabbing AzureAutomationAuthoringToolkit configuration."
 
@@ -105,7 +107,7 @@ function Get-AzureAutomationAuthoringToolkitConfiguration {
         throw $_
     }
 
-    if(!($Configuration.AutomationAccountName -and $Configuration.StaticAssetsPath -and $Configuration.AllowGrabSecrets -ne $Null)) {
+    if(!($Configuration.AutomationAccountName -and $Configuration.StaticAssetsPath -and $Configuration.AllowGrabSecrets -ne $Null -and $Configuration.SecretsCacheTimeInMinutes -ne $Null)) {
         throw $ConfigurationError
     }
 
@@ -169,54 +171,89 @@ function Get-AzureAutomationAuthoringToolkitAsset {
     $DoneJobStatuses = @("Completed", "Failed", "Stopped", "Blocked", "Suspended")
 
     $Configuration = Get-AzureAutomationAuthoringToolkitConfiguration
-    $AccountName = $Configuration.AutomationAccountName
 
-    # Call Get-AutomationAsset runbook in Azure Automation to get the asset value in serialized form
-    $Params = @{
-        "Type" = $Type;
-        "Name" = $Name
-    }
+    # Check if we already have looked up this asset and have it in the cache
+    $CachedAsset = $global:AssetCache["$Type$Name"]
+    $CachedValue = $Null
 
-    Test-AzureAutomationAuthoringToolkitAzureConnection
+    if($CachedAsset) {
+        Write-Verbose "AzureAutomationAuthoringToolkit: Found cached value of $Type asset '$Name'"
+        
+        $CachedUntil = Get-Date $CachedAsset.CachedUntil
+        $Now = Get-Date
 
-    Write-Verbose "AzureAutomationAuthoringToolkit: Starting Get-AutomationAsset runbook in Automation Account '$AccountName' 
-    to get value of $Type asset '$Name' for this Automation Account"
-
-    $Job = Start-AzureAutomationRunbook -Name "Get-AutomationAsset" -Parameters $Params -AutomationAccountName $AccountName
-
-    if(!$Job) {
-        throw "AzureAutomationAuthoringToolkit: Unable to start the 'Get-AutomationAsset' runbook. Make sure it exists and is published in Azure Automation."
-    }
-    else {
-        Write-Verbose "AzureAutomationAuthoringToolkit: Get-AutomationAsset job started. Job id: '$($Job.Id)'"
-
-        # Wait for Get-AutomationAsset completion
-        $TotalSeconds = 0
-        $JobInfo = $Null
-
-        do {
-            Write-Verbose "AzureAutomationAuthoringToolkit: Waiting for Get-AutomationAsset job completion..."
-            
-            Start-Sleep -Seconds $SleepTime
-            $TotalSeconds += $SleepTime
-
-            $JobInfo = Get-AzureAutomationJob -Id $Job.Id -AutomationAccountName $AccountName
-        } while((!$DoneJobStatuses.Contains($JobInfo.Status)) -and ($TotalSeconds -lt $MaxSecondsToWaitOnJobCompletion))
-
-        if($TotalSeconds -ge $MaxSecondsToWaitOnJobCompletion) {
-            throw "AzureAutomationAuthoringToolkit: Timeout exceeded. 'Get-AutomationAsset' job $($Job.Id) did not complete in $MaxSecondsToWaitOnJobCompletion seconds."
-        }
-        elseif($JobInfo.Exception) {
-            throw "AzureAutomationAuthoringToolkit: 'Get-AutomationAsset' job $($Job.Id) threw exception: $($JobInfo.Exception)"
+        if($Now -gt $CachedUntil) {
+            Write-Verbose "AzureAutomationAuthoringToolkit: Cached value of $Type asset '$Name' expired at $CachedUntil. Ignoring cached value."
         }
         else {
-            Write-Verbose "AzureAutomationAuthoringToolkit: Get-AutomationAsset job completed successfully. Deserializing output."
-            
-            $SerializedOutput = Get-AzureAutomationJobOutput -Id $Job.Id -Stream Output -AutomationAccountName $AccountName
-            
-            $Output = [System.Management.Automation.PSSerializer]::Deserialize($SerializedOutput.Text)  
+            $CachedValue = $CachedAsset.Value
+        }
+    }
 
-            Write-Output $Output
+
+    if($CachedValue) {
+        Write-Verbose "AzureAutomationAuthoringToolkit: Returning cached value of $Type asset '$Name'"
+        Write-Output $CachedValue
+    }
+    else {
+        $AccountName = $Configuration.AutomationAccountName
+
+        # Call Get-AutomationAsset runbook in Azure Automation to get the asset value in serialized form
+        $Params = @{
+            "Type" = $Type;
+            "Name" = $Name
+        }
+
+        Test-AzureAutomationAuthoringToolkitAzureConnection
+
+        Write-Verbose "AzureAutomationAuthoringToolkit: Starting Get-AutomationAsset runbook in Automation Account '$AccountName' 
+        to get value of $Type asset '$Name' for this Automation Account"
+
+        $Job = Start-AzureAutomationRunbook -Name "Get-AutomationAsset" -Parameters $Params -AutomationAccountName $AccountName
+
+        if(!$Job) {
+            throw "AzureAutomationAuthoringToolkit: Unable to start the 'Get-AutomationAsset' runbook. Make sure it exists and is published in Azure Automation."
+        }
+        else {
+            Write-Verbose "AzureAutomationAuthoringToolkit: Get-AutomationAsset job started. Job id: '$($Job.Id)'"
+
+            # Wait for Get-AutomationAsset completion
+            $TotalSeconds = 0
+            $JobInfo = $Null
+
+            do {
+                Write-Verbose "AzureAutomationAuthoringToolkit: Waiting for Get-AutomationAsset job completion..."
+            
+                Start-Sleep -Seconds $SleepTime
+                $TotalSeconds += $SleepTime
+
+                $JobInfo = Get-AzureAutomationJob -Id $Job.Id -AutomationAccountName $AccountName
+            } while((!$DoneJobStatuses.Contains($JobInfo.Status)) -and ($TotalSeconds -lt $MaxSecondsToWaitOnJobCompletion))
+
+            if($TotalSeconds -ge $MaxSecondsToWaitOnJobCompletion) {
+                throw "AzureAutomationAuthoringToolkit: Timeout exceeded. 'Get-AutomationAsset' job $($Job.Id) did not complete in $MaxSecondsToWaitOnJobCompletion seconds."
+            }
+            elseif($JobInfo.Exception) {
+                throw "AzureAutomationAuthoringToolkit: 'Get-AutomationAsset' job $($Job.Id) threw exception: $($JobInfo.Exception)"
+            }
+            else {
+                Write-Verbose "AzureAutomationAuthoringToolkit: Get-AutomationAsset job completed successfully. Deserializing output."
+            
+                $SerializedOutput = Get-AzureAutomationJobOutput -Id $Job.Id -Stream Output -AutomationAccountName $AccountName
+            
+                $Output = [System.Management.Automation.PSSerializer]::Deserialize($SerializedOutput.Text)  
+
+                $CacheUntil = (Get-Date).AddMinutes($Configuration.SecretsCacheTimeInMinutes)
+
+                Write-Verbose "AzureAutomationAuthoringToolkit: Caching value of $Type asset '$Name' until $CacheUntil."
+
+                $CachedAsset = $global:AssetCache["$Type$Name"] = @{
+                    "Value" = $Output
+                    "CachedUntil" = $CacheUntil.Ticks
+                }
+
+                Write-Output $Output
+            }
         }
     }
 }
