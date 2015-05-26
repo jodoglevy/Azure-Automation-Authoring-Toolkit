@@ -247,7 +247,7 @@ function Get-AzureAutomationAuthoringToolkitAsset {
 
                 Write-Verbose "AzureAutomationAuthoringToolkit: Caching value of $Type asset '$Name' until $CacheUntil."
 
-                $CachedAsset = $global:AssetCache["$Type$Name"] = @{
+                $global:AssetCache["$Type$Name"] = @{
                     "Value" = $Output
                     "CachedUntil" = $CacheUntil.Ticks
                 }
