@@ -130,7 +130,7 @@ function Test-AzureAutomationAuthoringToolkitAzureConnection {
         Write-Error "AzureAutomationAuthoringToolkit: AzureAutomationAuthoringToolkit could not connect to Azure.
         Make sure the Azure PowerShell module is installed and a connection from the Azure 
         PowerShell module to Azure has been set up with either Import-AzurePublishSettingsFile, 
-        Set-AzureSubscription, or Add-AzureAccount."
+        Set-AzureSubscription, or Add-AzureAccount. For more info see: http://azure.microsoft.com/en-us/documentation/articles/powershell-install-configure/#Connect"
 
         throw $_
     }
