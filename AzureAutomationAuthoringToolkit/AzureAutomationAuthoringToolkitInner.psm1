@@ -463,3 +463,70 @@ function Get-AutomationCertificate {
 
     Write-Output $AssetValue
 }
+
+<#
+    .SYNOPSIS
+        Exports runbooks from Azure Automation to the local filesystem.
+        Part of the Azure Automation Authoring Toolkit to help author runbooks locally.
+#>
+function Export-AzureAutomationRunbooksToLocal {
+    [CmdletBinding(HelpUri='http://aka.ms/azureautomationauthoringtoolkit')]
+    [OutputType([System.IO.FileInfo])]
+    
+    param(
+        [Parameter(Mandatory=$False)]
+        [string[]] $RunbookName,
+
+        [Parameter(Mandatory=$False)]
+        [string] $Path,
+
+        [Parameter(Mandatory=$False)]
+        [switch] $Draft,
+
+        [Parameter(Mandatory=$False)]
+        [switch] $Force
+    )
+
+    $Configuration = Get-AzureAutomationAuthoringToolkitConfiguration
+    $AccountName = $Configuration.AutomationAccountName
+
+    Test-AzureAutomationAuthoringToolkitAzureConnection
+
+    if(!$RunbookName) {
+        $RunbookName = (Get-AzureAutomationRunbook -AutomationAccountName $AccountName).Name
+    }
+
+    $Slot = "Published"
+    if($Draft.IsPresent) {
+        $Slot = "Draft"
+    }
+
+    if(!$Path) {
+        $Path = (pwd).Path
+    }
+
+    $Output = @()
+
+    $RunbookName | ForEach-Object {
+        Write-Verbose "AzureAutomationAuthoringToolkit: Outputting runbook '$_' to $Path"
+        
+        $RbDefinition = Get-AzureAutomationRunbookDefinition -AutomationAccountName $AccountName -Name $_ -Slot $Slot
+        $FilePath = "$Path\$_.ps1"
+        $FilePresent = Get-Item -Path $FilePath -ErrorAction SilentlyContinue
+
+        if($RbDefinition) {
+            
+            if(!$FilePresent -or ($FilePresent -and $Force.IsPresent)) {
+                Remove-Item $FilePath -Force -ErrorAction SilentlyContinue
+                $RbDefinition.Content >> $FilePath
+
+                $Output += (Get-Item $FilePath)
+            }
+            else {
+                Write-Error "AzureAutomationAuthoringToolkit: $FilePath already exists and -Force was not specified. Skipping runbook '$_'"
+            }
+        }
+    }
+
+    Write-Output $Output
+}

@@ -1,5 +1,5 @@
 ﻿<#
-    Learn more here: hhttp://aka.ms/azureautomationauthoringtoolkit
+    Learn more here: http://aka.ms/azureautomationauthoringtoolkit
 #>
 
 <#
