@@ -4,8 +4,7 @@
 
 $script:ConfigurationPath = "$PSScriptRoot\Config.json"
 $script:StaticAssetsPath = "$PSScriptRoot\StaticAssets.json"
-
-$global:AssetCache = @{}
+$script:SecretsCacheName = "AASecretsCache"
 
 <#
     .SYNOPSIS
@@ -173,8 +172,14 @@ function Get-AzureAutomationAuthoringToolkitAsset {
     $Configuration = Get-AzureAutomationAuthoringToolkitConfiguration
 
     # Check if we already have looked up this asset and have it in the cache
-    $CachedAsset = $global:AssetCache["$Type$Name"]
+    $CachedAsset = $Null
     $CachedValue = $Null
+    $CacheString = [Environment]::GetEnvironmentVariable($script:SecretsCacheName, "User")
+
+    if($CacheString) {
+        $Cache = ConvertFrom-Json $CacheString
+        $CachedAsset = $Cache."$Type$Name"
+    }
 
     if($CachedAsset) {
         Write-Verbose "AzureAutomationAuthoringToolkit: Found cached value of $Type asset '$Name'"
@@ -189,11 +194,16 @@ function Get-AzureAutomationAuthoringToolkitAsset {
             $CachedValue = $CachedAsset.Value
         }
     }
+    else {
+         Write-Verbose "AzureAutomationAuthoringToolkit: No cached value for $Type asset '$Name' was found."
+    }
 
 
     if($CachedValue) {
         Write-Verbose "AzureAutomationAuthoringToolkit: Returning cached value of $Type asset '$Name'"
-        Write-Output $CachedValue
+
+        $Output = [System.Management.Automation.PSSerializer]::Deserialize($CachedValue)  
+        Write-Output $Output
     }
     else {
         $AccountName = $Configuration.AutomationAccountName
@@ -209,7 +219,11 @@ function Get-AzureAutomationAuthoringToolkitAsset {
         Write-Verbose "AzureAutomationAuthoringToolkit: Starting Get-AutomationAsset runbook in Automation Account '$AccountName' 
         to get value of $Type asset '$Name' for this Automation Account"
 
-        $Job = Start-AzureAutomationRunbook -Name "Get-AutomationAsset" -Parameters $Params -AutomationAccountName $AccountName
+        $Job = Start-Job -ScriptBlock {
+            # running this in a seperate PS job because for some reason if I don't the verbose / warning
+            # streams after this line don't show up...
+            Start-AzureAutomationRunbook -Name "Get-AutomationAsset" -Parameters $args[0] -AutomationAccountName $args[1]
+        } -ArgumentList $Params, $AccountName | Wait-Job | Receive-Job
 
         if(!$Job) {
             throw "AzureAutomationAuthoringToolkit: Unable to start the 'Get-AutomationAsset' runbook. Make sure it exists and is published in Azure Automation."
@@ -227,7 +241,12 @@ function Get-AzureAutomationAuthoringToolkitAsset {
                 Start-Sleep -Seconds $SleepTime
                 $TotalSeconds += $SleepTime
 
-                $JobInfo = Get-AzureAutomationJob -Id $Job.Id -AutomationAccountName $AccountName
+                $JobInfo = Start-Job -ScriptBlock {
+                    # running this in a seperate PS job because for some reason if I don't the verbose / warning
+                    # streams after this line don't show up...
+                    Get-AzureAutomationJob -Id $args[0] -AutomationAccountName $args[1]
+                } -ArgumentList $Job.Id, $AccountName | Wait-Job | Receive-Job
+
             } while((!$DoneJobStatuses.Contains($JobInfo.Status)) -and ($TotalSeconds -lt $MaxSecondsToWaitOnJobCompletion))
 
             if($TotalSeconds -ge $MaxSecondsToWaitOnJobCompletion) {
@@ -240,18 +259,36 @@ function Get-AzureAutomationAuthoringToolkitAsset {
                 Write-Verbose "AzureAutomationAuthoringToolkit: Get-AutomationAsset job completed successfully. Deserializing output."
             
                 $SerializedOutput = Get-AzureAutomationJobOutput -Id $Job.Id -Stream Output -AutomationAccountName $AccountName
-            
-                $Output = [System.Management.Automation.PSSerializer]::Deserialize($SerializedOutput.Text)  
 
-                $CacheUntil = (Get-Date).AddMinutes($Configuration.SecretsCacheTimeInMinutes)
+                if($Configuration.SecretsCacheTimeInMinutes -gt 0) {
+                    $CacheUntil = (Get-Date).AddMinutes($Configuration.SecretsCacheTimeInMinutes)
 
-                Write-Verbose "AzureAutomationAuthoringToolkit: Caching value of $Type asset '$Name' until $CacheUntil."
+                    Write-Verbose "AzureAutomationAuthoringToolkit: Caching value of $Type asset '$Name' until $CacheUntil."
 
-                $global:AssetCache["$Type$Name"] = @{
-                    "Value" = $Output
-                    "CachedUntil" = $CacheUntil.Ticks
+                    $CacheString = [Environment]::GetEnvironmentVariable($script:SecretsCacheName, "User")
+                    if($CacheString) {
+                        $Cache = ConvertFrom-Json $CacheString
+                    }
+                    else {
+                        $Cache = @{}
+                    }
+
+                    $Cache."$Type$Name" = @{
+                        "Value" = $SerializedOutput.Text
+                        "CachedUntil" = $CacheUntil.Ticks
+                    }
+
+                    [Environment]::SetEnvironmentVariable($script:SecretsCacheName, (ConvertTo-Json $Cache -Depth 10), "User")
+
+                    Write-Warning "AzureAutomationAuthoringToolkit: Warning - the toolkit's secrets cache now contains the value of $Type asset '$Name'.
+                    Make sure to clear the cache when you are done authoring, using the Reset-AzureAutomationAuthoringToolkitSecretsCache cmdlet, if you want to
+                    ensure this asset's value stays secure."
+                }
+                else {
+                    Write-Verbose "AzureAutomationAuthoringToolkit: SecretsCacheTimeInMinutes is 0, not caching value of $Type asset '$Name'."
                 }
 
+                $Output = [System.Management.Automation.PSSerializer]::Deserialize($SerializedOutput.Text)  
                 Write-Output $Output
             }
         }
@@ -462,6 +499,24 @@ function Get-AutomationCertificate {
     }
 
     Write-Output $AssetValue
+}
+
+<#
+    .SYNOPSIS
+        Clears the Secrets Cache that is used if AllowGrabSecrets is enabled in Config.json.
+        Part of the Azure Automation Authoring Toolkit to help author runbooks locally.
+#>
+function Reset-AzureAutomationAuthoringToolkitSecretsCache {
+    [CmdletBinding(HelpUri='http://aka.ms/azureautomationauthoringtoolkit')]
+    param()
+
+    try {
+        [Environment]::SetEnvironmentVariable($script:SecretsCacheName, $null, "User")
+        "Successfully cleared the secrets cache"
+    }
+    catch {
+        throw $_
+    }
 }
 
 <#
